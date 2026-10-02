@@ -1,0 +1,42 @@
+# Environments and venv
+.venv/
+venv/
+ENV/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.coverage.*
+.cache
+
+# Linters and formatters
+.ruff_cache/
+.mypy_cache/
+
+# Environment files
+.env
+!.env.example
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Docker
+*.local
+
+# Database
+*.sqlite
+*.sqlite3
+*.db
+
+# Assignment / PDF docs
+*.pdf

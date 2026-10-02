@@ -1,0 +1,80 @@
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: diagpay_api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - PROJECT_NAME=DiagPay
+      - ENVIRONMENT=production
+      - DEBUG=false
+      - API_V1_PREFIX=/api/v1
+      - DATABASE_URL=postgresql+asyncpg://postgres:postgres@postgres:5432/diagpay_db
+      - SYNC_DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/diagpay_db
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_ENABLED=true
+      - CACHE_TTL_SECONDS=300
+      - JWT_SECRET_KEY=diagpay-super-secret-jwt-key-minimum-32-chars-for-hmac-sha256
+      - JWT_ALGORITHM=HS256
+      - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=120
+      - WEBHOOK_SECRET=diagpay-webhook-hmac-secret-key-for-verifying-payloads
+      - CORS_ORIGINS=["http://localhost", "http://localhost:3000", "http://localhost:8000"]
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - RATE_LIMIT_DEFAULT=100/minute
+      - RATE_LIMIT_AUTH=15/minute
+      - RATE_LIMIT_PAYMENT=30/minute
+      - RATE_LIMIT_WEBHOOK=60/minute
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: diagpay_postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=diagpay_db
+    ports:
+      - "${POSTGRES_PORT:-5434}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d diagpay_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: diagpay_redis
+    restart: unless-stopped
+    ports:
+      - "${REDIS_PORT:-6380}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  postgres_data:
+  redis_data:
