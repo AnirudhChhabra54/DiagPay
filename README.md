@@ -1,378 +1,124 @@
 # DiagPay — Diagnostic Booking & Simulated Payment Backend
 
-[![Python 3.12](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12%2B-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.110%2B-009688.svg)](https://fastapi.tiangolo.com)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-336791.svg)](https://www.postgresql.org/)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D.svg)](https://redis.io/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
-[![Code style: black](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
-[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
+[![Tests](https://img.shields.io/badge/Tests-53%20Passed%20(100%25)-success.svg)](tests/)
+[![Coverage](https://img.shields.io/badge/Coverage-75%25-brightgreen.svg)](tests/)
+[![Code style](https://img.shields.io/badge/Code%20Style-Black%20%26%20Ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-**DiagPay** is a production-grade, highly available backend service engineered for diagnostic health appointment bookings and simulated financial payment transactions. Built as part of the **EVE Healthcare SDE Intern Backend Assessment**, the project emphasizes clean layered architecture, database integrity, strict concurrency control, idempotent webhook ingestion, structured observability, and comprehensive test automation.
-
----
-
-## Table of Contents
-
-1. [Project Overview](#1-project-overview)
-2. [Key Features](#2-key-features)
-3. [Architecture & System Design](#3-architecture--system-design)
-4. [Tech Stack](#4-tech-stack)
-5. [Folder Structure](#5-folder-structure)
-6. [Database Schema & Design Detail](#6-database-schema--design-detail)
-7. [API Endpoint Directory](#7-api-endpoint-directory)
-8. [Core Workflows](#8-core-workflows)
-   - [Authentication Flow](#authentication-flow)
-   - [Booking Flow](#booking-flow)
-   - [Simulated Payment Flow](#simulated-payment-flow)
-   - [Webhook Idempotency Design](#webhook-idempotency-design)
-9. [Edge-Case Handling & Error Responses](#9-edge-case-handling--error-responses)
-10. [Environment Variables](#10-environment-variables)
-11. [Quickstart: Docker Setup](#11-quickstart-docker-setup-recommended)
-12. [Local Development Setup](#12-local-development-setup)
-13. [Database Migrations (Alembic)](#13-database-migrations-alembic)
-14. [Seeded Demo Accounts](#14-seeded-demo-accounts)
-15. [Running Tests](#15-running-tests)
-16. [Interactive API Documentation](#16-interactive-api-documentation)
-17. [Example cURL Commands](#17-example-curl-commands)
-18. [Assumptions, Design Decisions & Trade-offs](#18-assumptions-design-decisions--trade-offs)
-19. [What Could Be Improved With More Time](#19-what-could-be-improved-with-more-time)
+**DiagPay** is a production-oriented diagnostic healthcare appointment booking and simulated payment backend. It provides authentication, diagnostic centre and test management, centre-specific pricing, appointment bookings, simulated payments, and secure webhook processing.
 
 ---
 
-## 1. Project Overview
+## Verification & Execution Proofs
 
-DiagPay provides the medical booking and simulated payment infrastructure for diagnostic laboratory networks. It allows patients to discover accredited diagnostic centres, inspect medical test catalogues with centre-specific pricing, schedule future appointments, and complete payments with immediate confirmation. External payment processors update booking states asynchronously through an idempotent webhook receiver.
+To allow immediate verification of the system's operational readiness, test coverage, and API surface, proofs generated from the running environment are included below:
 
----
+### 1. Test Suite Proof (53/53 Tests Passing, 100% Pass Rate, 75% Overall Coverage)
+Core application flows, concurrency edge cases, payment simulations, and webhook idempotency behaviors are verified through automated tests running against an async database:
 
-## 2. Key Features
+![Automated Test Suite Proof](docs/images/test_results_proof.png)
 
-- **Robust Authentication**: Argon2 password hashing (no plaintext or hash leaks) and cryptographically signed JWT access tokens with role enforcement (`USER` vs `ADMIN`).
-- **Flexible Test Pricing Model**: Real-world decoupled pricing model where diagnostic test rates are bound to specific centres (`CentreTest`), not static to the test itself.
-- **Transactional Booking Lifecycle**: Validates centre and test readiness, enforces future appointment time slots, captures immutable price snapshots, and prevents duplicate active slot reservations.
-- **Mock Payment Processor**: Deterministic simulation of payment attempts (`SUCCESS` / `FAILED`) updating bookings atomically without integrating live card gateways.
-- **Idempotent Webhook Processing**: Guarantees zero duplicate payments, protects against out-of-order/stale events, rejects conflicting event payloads (HTTP 409), and protects cancelled bookings from accidental confirmation.
-- **Redis Caching with Invalidation**: Caches high-throughput catalogue reads with automated pattern invalidation on administrative mutations, featuring graceful degradation if Redis is offline.
-- **Fixed-Window Rate Limiting**: SlowAPI protection on sensitive entry points (`/auth/login`, `/auth/signup`, `/payments`, `/payments/webhook`) with automated fallback.
-- **Structured JSON Logging**: Structlog integration with request correlation IDs (`X-Request-ID`), process latency headers (`X-Process-Time`), and automatic redaction of credentials and secrets.
+### 2. Docker Health & Container Proof
+The entire stack boots with health checks, automated schema migrations (`alembic upgrade head`), and data seeding in a single command:
 
----
+![Docker Compose Health Proof](docs/images/docker_health_proof.png)
 
-## 3. Architecture & System Design
+### 3. Interactive OpenAPI 3.0 (Swagger UI) Overview
+Complete API endpoint reference (25 operations across 16 unique paths) organized by business domain with complete request/response schemas, bearer token authentication, and status codes:
 
-DiagPay uses a **Layered Architecture** adhering to clean code principles:
-
-```mermaid
-graph TD
-    Client[Client / Third-Party Provider] -->|HTTP / REST| Middleware[CORS + Structlog Request Middleware + Rate Limiter]
-    Middleware --> Routers[FastAPI Presentation Routers: /api/v1/*]
-    Routers --> Dependencies[Auth & Authorization Guards: get_current_user, require_admin]
-    Dependencies --> Services[Domain Services: Auth, Centre, Test, Booking, Payment, Webhook]
-    Services --> DB[(PostgreSQL 16: SQLAlchemy 2.0 Async)]
-    Services --> Cache[(Redis 7: Caching & Rate Limiting)]
-    Services --> Security[Argon2id + PyJWT + HMAC-SHA256]
-```
-
-### Architecture Guarantees
-- **Routers** are thin controllers; business logic and orchestration are strictly confined to domain services (`app/services/`).
-- **Transactions** are managed explicitly with row locking (`with_for_update`) during state transitions to prevent race conditions.
-- **Repository / ORM isolation**: All queries leverage SQLAlchemy 2.0 type-safe expressions with async drivers (`asyncpg`).
+![Swagger API Overview](docs/images/swagger_overview.png)
 
 ---
 
-## 4. Tech Stack
+## Project Navigation
 
-- **Language**: Python 3.12+ (tested with 3.11 & 3.12)
-- **Framework**: FastAPI (Async ASGI)
-- **Database**: PostgreSQL 16 (with `asyncpg` async driver & `psycopg2-binary` sync driver)
-- **ORM**: SQLAlchemy 2.0 (Declarative Mappings, `Mapped`, `mapped_column`)
-- **Database Migrations**: Alembic
-- **Validation**: Pydantic v2 & `pydantic-settings`
-- **Authentication**: PyJWT (HMAC-SHA256) & `argon2-cffi` (Argon2id password hashing)
-- **Caching & Rate Limiting**: Redis 7, `redis-py` (async), `slowapi`
-- **Structured Logging**: `structlog` (JSON in production, colorful dev console in debug)
-- **Testing**: `pytest`, `pytest-asyncio`, `httpx` (AsyncClient)
-- **Containerization**: Docker & Docker Compose
-- **Linting & Formatting**: Ruff & Black
+1. [What DiagPay Is](#1-what-diagpay-is)
+2. [Why It Was Designed This Way](#2-why-it-was-designed-this-way)
+3. [How to Run It](#3-how-to-run-it)
+4. [What APIs Exist](#4-what-apis-exist)
+5. [How the Database Is Structured](#5-how-the-database-is-structured)
+6. [How Booking, Payment & Webhook Flows Work](#6-how-booking-payment--webhook-flows-work)
+7. [How Edge Cases Are Handled](#7-how-edge-cases-are-handled)
+8. [How the Project Is Tested](#8-how-the-project-is-tested)
+9. [What Engineering Decisions Were Made](#9-what-engineering-decisions-were-made)
+10. [Implementation Coverage](#10-implementation-coverage)
 
 ---
 
-## 5. Folder Structure
+## 1. What DiagPay Is
 
-```
-diagpay-backend/
-├── .dockerignore
-├── .env.example
-├── .gitignore
-├── alembic.ini
-├── docker-compose.yml
-├── Dockerfile
-├── entrypoint.sh
-├── pyproject.toml
-├── requirements.txt
-├── README.md
-├── alembic/
-│   ├── env.py
-│   ├── script.py.mako
-│   └── versions/
-│       └── 001_initial_schema.py
-├── app/
-│   ├── __init__.py
-│   ├── config.py             # Pydantic v2 Environment Settings
-│   ├── database.py           # Async and Sync SQLAlchemy 2.0 engines & sessionmakers
-│   ├── dependencies.py       # Reusable Fastapi dependencies (auth, admin, DB)
-│   ├── exceptions.py         # Uniform error models & global exception handlers
-│   ├── logging_config.py     # Structlog structured logging & credential sanitizer
-│   ├── main.py               # Application factory, middlewares & router mounts
-│   ├── api/
-│   │   ├── router.py         # Unified v1 router
-│   │   └── v1/
-│   │       ├── auth.py       # Signup, Login, Me
-│   │       ├── bookings.py   # Booking creation, listing, cancel
-│   │       ├── centres.py    # Centres CRUD, centre-test offerings
-│   │       ├── health.py     # System readiness & service connectivity
-│   │       ├── payments.py   # Simulated payments & webhook receiver
-│   │       └── tests.py      # Diagnostic tests catalogue
-│   ├── core/
-│   │   ├── rate_limit.py     # SlowAPI limiter with Redis/memory fallback
-│   │   └── security.py       # Argon2 hashing, JWT signing, HMAC-SHA256
-│   ├── models/
-│   │   ├── base.py           # Base, UUIDMixin, TimestampMixin
-│   │   ├── booking.py        # Booking model & BookingStatus enum
-│   │   ├── centre.py         # DiagnosticCentre model
-│   │   ├── centre_test.py    # CentreTest mapping with price & unique constraint
-│   │   ├── payment.py        # Payment model & PaymentStatus enum
-│   │   ├── test.py           # DiagnosticTest model
-│   │   └── user.py           # User model & UserRole enum
-│   ├── schemas/
-│   │   ├── booking.py        # Booking Pydantic v2 schemas
-│   │   ├── centre.py         # Centre schemas
-│   │   ├── centre_test.py    # Pricing mapping schemas
-│   │   ├── common.py         # PaginatedResponse, MessageResponse, ErrorResponse
-│   │   ├── payment.py        # Simulated payment & Webhook schemas
-│   │   ├── test.py           # Test schemas
-│   │   └── user.py           # Auth & User schemas
-│   ├── scripts/
-│   │   └── seed.py           # Idempotent database seeder (admin, centres, tests)
-│   └── services/
-│       ├── auth_service.py   # User registration & verification
-│       ├── booking_service.py# Booking validations & transitions
-│       ├── cache_service.py  # Redis cache client with graceful fallback
-│       ├── centre_service.py # Centre queries & cache invalidation
-│       ├── payment_service.py# Payment simulation logic
-│       ├── test_service.py   # Test catalogue & mapping management
-│       └── webhook_service.py# Idempotent webhook processing
-├── docs/
-│   ├── ARCHITECTURE.md       # Detailed technical design & state machines
-│   └── IMPLEMENTATION_CHECKLIST.md # Requirement-to-file traceability matrix
-└── tests/
-    ├── conftest.py           # Pytest fixtures & async test database setup
-    ├── test_auth.py          # Authentication tests
-    ├── test_bookings.py      # Booking validations & lifecycle tests
-    ├── test_centre_tests.py  # Centre-test pricing & offering tests
-    ├── test_centres.py       # Diagnostic centre CRUD & authorization tests
-    ├── test_health.py        # Service health endpoint tests
-    ├── test_payments.py      # Simulated payment tests
-    ├── test_rate_limit.py    # Rate limiter enforcement tests
-    ├── test_tests.py         # Diagnostic test catalogue tests
-    └── test_webhooks.py      # Webhook idempotency & concurrency tests
-```
+DiagPay is a backend service for diagnostic health networks that bridges patient appointment scheduling with asynchronous payment processing:
+
+- **Patient Experience**: Patients discover diagnostic centres, inspect available laboratory tests with centre-specific pricing, schedule appointments for future time slots, and initiate payment simulations.
+- **Provider & Gateway Integration**: External payment gateways push transaction updates asynchronously via signed webhooks. DiagPay processes these events with strict deduplication, preventing duplicate state transitions.
+- **Administrative Control**: Healthcare administrators manage centres, catalogued tests, availability flags, and pricing schedules with automatic cache invalidation.
 
 ---
 
-## 6. Database Schema & Design Detail
+## 2. Why It Was Designed This Way
 
-### Important Design Detail: Decoupled Centre-Test Pricing
-A test like **Complete Blood Count (CBC)** or **Lipid Profile** has different operating expenses across different facilities. Rather than storing price as an attribute of `DiagnosticTest`, DiagPay uses a junction table `CentreTest`:
+DiagPay is built around four fundamental design principles:
 
-```sql
-DiagnosticCentre (id, name, location, is_active)
-DiagnosticTest (id, name, description, is_active)
-CentreTest (id, centre_id, test_id, price, is_available) -> CONSTRAINT: UNIQUE(centre_id, test_id)
-```
+### Layered Separation of Concerns
+The codebase strictly decouples HTTP transport from business rules:
+- **Routers (`app/api/v1/`)**: Pure controllers responsible only for HTTP parameter parsing, status codes, and invoking domain services.
+- **Dependencies (`app/dependencies.py`)**: Reusable injection layer handling database sessions, JWT verification, and Role-Based Access Control (`USER` vs `ADMIN`).
+- **Domain Services (`app/services/`)**: Encapsulate all business logic, validation invariants, transaction boundaries, and row-level locks.
+- **Data Layer (`app/models/`)**: SQLAlchemy 2.0 type-annotated declarative models with PostgreSQL-specific constraints.
 
-### Price Snapshotting in Booking
-When a booking is created, the system fetches the current `CentreTest.price` and persists it directly into `Booking.amount`. This guarantees that subsequent price adjustments by laboratory administrators will never mutate the agreed transaction amount of past or pending bookings.
+### Decoupled Healthcare Pricing (`CentreTest`)
+In actual medical networks, a test like *Lipid Profile* does not have a single fixed price—cost depends on the diagnostic centre's location, equipment, and overhead. Rather than hardcoding price on the `DiagnosticTest` entity, pricing is modeled through a `CentreTest` junction table.
 
-### Monetary Precision
-All monetary quantities use SQL `NUMERIC(10, 2)` and Python `Decimal`. Floating-point values (`float`) are strictly forbidden.
+### Immutable Financial Snapshots
+When a booking is created, the current price from `CentreTest.price` is permanently snapshotted into `Booking.amount`. If a centre updates its test rates in the future, past and pending booking amounts remain unaffected.
 
----
-
-## 7. API Endpoint Directory
-
-All business endpoints are versioned under `/api/v1/`:
-
-| Method | Endpoint | Access | Description | Status Codes |
-|---|---|---|---|---|
-| `POST` | `/api/v1/auth/signup` | Public | Register new user account | `201`, `409`, `422` |
-| `POST` | `/api/v1/auth/login` | Public | Authenticate and obtain JWT | `200`, `401`, `422` |
-| `GET` | `/api/v1/auth/me` | Authenticated | Fetch current user profile | `200`, `401` |
-| `GET` | `/api/v1/centres` | Authenticated | List centres (cached, paginated) | `200`, `401` |
-| `GET` | `/api/v1/centres/{id}` | Authenticated | Get centre details (cached) | `200`, `404` |
-| `POST` | `/api/v1/centres` | Admin | Create diagnostic centre | `201`, `403` |
-| `PATCH` | `/api/v1/centres/{id}` | Admin | Update centre details | `200`, `403`, `404` |
-| `DELETE`| `/api/v1/centres/{id}` | Admin | Deactivate centre (soft-delete) | `200`, `403`, `404` |
-| `GET` | `/api/v1/centres/{id}/tests` | Authenticated | List tests offered at centre | `200`, `404` |
-| `POST` | `/api/v1/centres/{id}/tests` | Admin | Map test to centre with price | `201`, `403`, `404` |
-| `PATCH` | `/api/v1/centres/{id}/tests/{tid}` | Admin | Update test price/availability | `200`, `403`, `404` |
-| `DELETE`| `/api/v1/centres/{id}/tests/{tid}` | Admin | Unmap test from centre | `200`, `403`, `404` |
-| `GET` | `/api/v1/tests` | Authenticated | List tests (cached, paginated) | `200`, `401` |
-| `GET` | `/api/v1/tests/{id}` | Authenticated | Get test details | `200`, `404` |
-| `POST` | `/api/v1/tests` | Admin | Create test in catalog | `201`, `403` |
-| `PATCH` | `/api/v1/tests/{id}` | Admin | Update catalog test | `200`, `403`, `404` |
-| `DELETE`| `/api/v1/tests/{id}` | Admin | Deactivate test | `200`, `403`, `404` |
-| `POST` | `/api/v1/bookings` | Authenticated | Book a diagnostic appointment | `201`, `400`, `404`, `409` |
-| `GET` | `/api/v1/bookings` | Authenticated | List user's bookings (admin sees all) | `200`, `401` |
-| `GET` | `/api/v1/bookings/{id}` | Authenticated | Get booking details (owner or admin) | `200`, `403`, `404` |
-| `PATCH` | `/api/v1/bookings/{id}/cancel` | Authenticated | Cancel booking (idempotent) | `200`, `403`, `404`, `409` |
-| `POST` | `/api/v1/payments` | Authenticated | Simulate payment (SUCCESS/FAILED) | `201`, `403`, `404`, `409` |
-| `POST` | `/api/v1/payments/webhook` | Provider | Ingest payment event idempotently | `200`, `401`, `404`, `409` |
-| `GET` | `/health` | Public | System readiness & dependency status | `200`, `503` |
+### Pessimistic Concurrency for Financial Safety
+Financial state transitions (confirming or failing a booking) use `SELECT ... FOR UPDATE` row locks within atomic database transactions. This eliminates race conditions during simultaneous payment attempts or webhook replays.
 
 ---
 
-## 8. Core Workflows
+## 3. How to Run It
 
-### Authentication Flow
-1. **Signup**: Request email is trimmed and normalized to lowercase. Password is validated for minimum length (8 chars) and hashed using Argon2id. Password hashes are never serialized or returned.
-2. **Login**: Verifies credentials against Argon2 hash. Issues a signed JWT bearer token containing `sub` (user UUID) and `role` (`USER` or `ADMIN`).
-3. **Authorization**: Fast, stateless JWT validation via `get_current_user()` and `require_admin()` dependencies.
+### Option A: Docker (Recommended — Single Command)
 
-### Booking Flow
-1. Patient selects `centre_id`, `test_id`, and `appointment_at` (must be in the future).
-2. Service verifies that:
-   - Centre exists and is active (`is_active = true`).
-   - Test exists and is active (`is_active = true`).
-   - Test is mapped and available at the centre (`is_available = true`).
-   - Patient does not already have an active (`PENDING` or `CONFIRMED`) booking for the exact same test, centre, and time slot.
-3. Retrieves current price snapshot from `CentreTest.price`.
-4. Saves new booking in `PENDING` state inside an atomic transaction.
-
-### Simulated Payment Flow
-1. Client sends `{"booking_id": "<uuid>", "simulate_result": "SUCCESS" | "FAILED"}`.
-2. Verifies booking exists and belongs to the authenticated user.
-3. Rejects payment if the booking is already `CANCELLED` (HTTP 409) or `CONFIRMED` (HTTP 409).
-4. Generates unique mock `provider_payment_id` (`sim_pay_*`) and `event_id` (`evt_sim_*`).
-5. Atomically records payment and transitions booking state:
-   - `SUCCESS` $\rightarrow$ `CONFIRMED`
-   - `FAILED` $\rightarrow$ `FAILED`
-
-### Webhook Idempotency Design
-The payment webhook receiver (`POST /api/v1/payments/webhook`) supports high-concurrency ingestion and network retries:
-1. **Signature Verification**: Validates `X-Webhook-Signature` using HMAC-SHA256 with constant-time equality check.
-2. **Duplicate Detection**:
-   - If the exact same `event_id` is re-received with identical payload attributes (`provider_payment_id`, `booking_id`, `amount`, `status`), the endpoint returns **HTTP 200 OK** (`idempotent: true`) without creating duplicate database records.
-   - If an existing `event_id` is re-received with a conflicting payload, it is rejected with **HTTP 409 Conflict** (`EVENT_PAYLOAD_MISMATCH`).
-3. **Row Locking**: Acquires a row lock on the target booking (`with_for_update()`) to prevent race conditions during state transitions.
-4. **State Transition Rules**:
-   - `CANCELLED` bookings will **never** transition to `CONFIRMED` (HTTP 409 `BOOKING_ALREADY_CANCELLED`).
-   - `CONFIRMED` bookings will never transition to `FAILED` due to delayed/stale events.
-
----
-
-## 9. Edge-Case Handling & Error Responses
-
-DiagPay enforces a uniform JSON error response format:
-
-```json
-{
-  "detail": "Descriptive human-readable explanation",
-  "code": "SPECIFIC_ERROR_CODE"
-}
-```
-
-### Standard HTTP Status Codes
-
-- `200 OK`: Request succeeded.
-- `201 Created`: Resource successfully created.
-- `400 Bad Request`: Inactive centre/test, invalid appointment time.
-- `401 Unauthorized`: Missing/invalid token, bad password, invalid webhook signature.
-- `403 Forbidden`: Insufficient role permissions or accessing another user's private booking.
-- `404 Not Found`: Resource with requested UUID does not exist.
-- `409 Conflict`: Duplicate email, duplicate booking slot, event ID conflict, payload mismatch, or illegal state transition.
-- `422 Unprocessable Content`: Validation schema failure.
-- `429 Too Many Requests`: Rate limit exceeded.
-- `500 Internal Server Error`: Unhandled server exception (raw database traces are never exposed).
-
----
-
-## 10. Environment Variables
-
-Configure via `.env` file (see `.env.example`):
+Prerequisites: [Docker Desktop](https://www.docker.com/) installed and running.
 
 ```bash
-# General
-PROJECT_NAME=DiagPay
-ENVIRONMENT=development
-DEBUG=true
-API_V1_PREFIX=/api/v1
+# Clone the repository
+git clone https://github.com/AnirudhChhabra54/DiagPay.git
+cd DiagPay
 
-# Databases
-DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/diagpay_db
-SYNC_DATABASE_URL=postgresql+psycopg2://postgres:postgres@localhost:5432/diagpay_db
-
-# Redis
-REDIS_URL=redis://localhost:6379/0
-REDIS_ENABLED=true
-CACHE_TTL_SECONDS=300
-
-# Security & Secrets
-JWT_SECRET_KEY=diagpay-super-secret-jwt-key-minimum-32-chars-for-hmac-sha256
-JWT_ALGORITHM=HS256
-JWT_ACCESS_TOKEN_EXPIRE_MINUTES=120
-WEBHOOK_SECRET=diagpay-webhook-hmac-secret-key-for-verifying-payloads
-
-# CORS
-CORS_ORIGINS=["http://localhost", "http://localhost:3000", "http://localhost:8000"]
-
-# Rate Limiting
-RATE_LIMIT_DEFAULT=100/minute
-RATE_LIMIT_AUTH=15/minute
-RATE_LIMIT_PAYMENT=30/minute
-RATE_LIMIT_WEBHOOK=60/minute
-```
-
----
-
-## 11. Quickstart: Docker Setup (Recommended)
-
-Start the entire stack (FastAPI API, PostgreSQL 16, Redis 7) with a single command:
-
-```bash
+# Start API, PostgreSQL 16, and Redis 7 in background
 docker compose up --build -d
 ```
 
-### What Happens Automatically at Startup
-1. PostgreSQL and Redis initialize with health checks.
-2. The `api` container waits until PostgreSQL and Redis accept connections.
-3. Automatically runs database migrations: `alembic upgrade head`.
-4. Automatically runs the idempotent seeder: `python -m app.scripts.seed`.
-5. Starts the production Uvicorn server on port `8000`.
+**What happens automatically at startup:**
+1. PostgreSQL 16 and Redis 7 start with container health checks.
+2. The `diagpay_api` service waits for database readiness.
+3. Automatically executes database migrations (`alembic upgrade head`).
+4. Automatically runs the database seeder (`python -m app.scripts.seed`).
+5. Launches Uvicorn ASGI server on port `8000`.
 
-### Verify Docker Services
+**Verify services:**
 ```bash
-# Check container status
 docker compose ps
-
-# Check API health
 curl -s http://localhost:8000/health | python3 -m json.tool
-
-# Stream application logs
-docker compose logs -f api
 ```
 
-To stop all services:
+To stop containers:
 ```bash
 docker compose down
 ```
 
 ---
 
-## 12. Local Development Setup
+### Option B: Local Setup (Outside Docker)
 
-If you prefer running outside Docker:
+Prerequisites: Python 3.12+, PostgreSQL running locally, and Redis (optional).
 
 ```bash
 # 1. Create and activate virtual environment
@@ -382,183 +128,437 @@ source .venv/bin/activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Create .env file
+# 3. Configure environment
 cp .env.example .env
 
-# 4. Run database migrations
+# 4. Apply database migrations
 alembic upgrade head
 
-# 5. Seed initial demo data
+# 5. Seed initial admin & demo catalogue
 python3 -m app.scripts.seed
 
-# 6. Start development server
+# 6. Launch development server
 uvicorn app.main:app --reload --port 8000
 ```
 
 ---
 
-## 13. Database Migrations (Alembic)
+### Environment Configuration & Secret Labeling
 
-Database schema versioning is managed with Alembic:
+Configure application variables via `.env`. A complete template is provided in `.env.example`:
 
-```bash
-# Apply all pending migrations
-alembic upgrade head
+| Variable | Example Value | Description |
+|---|---|---|
+| `PROJECT_NAME` | `DiagPay` | Application display name |
+| `ENVIRONMENT` | `development` | Deployment environment (`development` / `production`) |
+| `DEBUG` | `true` | Debug toggle for verbose logging and Swagger docs |
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/diagpay_db` | Async SQLAlchemy PostgreSQL connection string |
+| `SYNC_DATABASE_URL` | `postgresql+psycopg2://postgres:postgres@localhost:5432/diagpay_db` | Sync SQLAlchemy connection string for Alembic |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis caching and rate-limiting connection |
+| `REDIS_ENABLED` | `true` | Toggle Redis caching (falls back to DB if false) |
+| `JWT_SECRET_KEY` | `diagpay-super-secret-jwt-key-minimum-32-chars-for-hmac-sha256` | **Development/Demo Secret Only** — Rotate in production with secure random key |
+| `JWT_ALGORITHM` | `HS256` | Symmetric signature algorithm for JWT |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | `120` | Access token lifespan in minutes |
+| `WEBHOOK_SECRET` | `diagpay-webhook-hmac-secret-key-for-verifying-payloads` | **Development/Demo Secret Only** — Rotate in production with secure random key |
+| `CORS_ORIGINS` | `["http://localhost", "http://localhost:3000", "http://localhost:8000"]` | Allowed CORS origins (JSON array) |
+| `RATE_LIMIT_DEFAULT` | `100/minute` | Default SlowAPI fixed-window request threshold |
+| `RATE_LIMIT_AUTH` | `15/minute` | Rate limit for `/auth/login` and `/auth/signup` |
+| `RATE_LIMIT_PAYMENT` | `30/minute` | Rate limit for `/payments` endpoint |
+| `RATE_LIMIT_WEBHOOK` | `60/minute` | Rate limit for `/payments/webhook` endpoint |
 
-# Create a new auto-generated migration
-alembic revision --autogenerate -m "Add new field"
-
-# Rollback one migration
-alembic downgrade -1
-```
+> [!WARNING]
+> The `JWT_SECRET_KEY` and `WEBHOOK_SECRET` values above are preconfigured solely for local development, demo walkthroughs, and automated test fixtures. Production deployments must inject cryptographically secure secrets via secret managers.
 
 ---
 
-## 14. Seeded Demo Accounts
+### Pre-Seeded Credentials & Demo Data
 
-The application seeds the following credentials upon initialization:
+The database seeder initializes the following accounts and catalogue:
 
 | Role | Email | Password | Permissions |
 |---|---|---|---|
 | **Administrator** | `admin@diagpay.com` | `AdminPass123!` | Full CRUD on centres, tests, mappings, view all bookings |
-| **Regular User** | `user@diagpay.com` | `UserPass123!` | Create bookings, simulate payments, view own records |
+| **Regular User** | `user@diagpay.com` | `UserPass123!` | Book appointments, simulate payments, view own records |
 
-### Pre-Seeded Catalog Data
 - **3 Diagnostic Centres**: Apex Diagnostic Hub, Metro PathLabs, Suburban Health Care.
 - **4 Diagnostic Tests**: Complete Blood Count (CBC), Lipid Profile, Liver Function Test (LFT), HbA1c Diabetes Screen.
-- **12 Centre-Test Mappings**: Realistic individual prices per centre (e.g. CBC is ₹350 at Apex, ₹400 at Metro, ₹320 at Suburban).
+- **12 Centre-Test Mappings**: Realistic individual prices per centre (e.g., CBC is ₹350.00 at Apex, ₹400.00 at Metro, ₹320.00 at Suburban).
 
 ---
 
-## 15. Running Tests
+## 4. What APIs Exist
 
-The test suite runs with in-memory SQLite and mock cache, requiring zero external services:
+Interactive documentation is available live at:
+- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
+- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
+- **OpenAPI Schema**: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
+
+### Complete API Endpoint Reference
+
+The service exposes 25 operations across 16 unique routes:
+
+| Method | Endpoint | Access | Purpose | Key Response Codes |
+|---|---|---|---|---|
+| `POST` | `/api/v1/auth/signup` | Public | Register new user account | `201`, `409`, `422` |
+| `POST` | `/api/v1/auth/login` | Public | Authenticate user & issue signed JWT | `200`, `401`, `422` |
+| `GET` | `/api/v1/auth/me` | Authenticated | Retrieve current user profile | `200`, `401` |
+| `GET` | `/api/v1/centres` | Authenticated | List diagnostic centres (cached, paginated) | `200`, `401` |
+| `GET` | `/api/v1/centres/{id}` | Authenticated | Get centre details (cached) | `200`, `404` |
+| `POST` | `/api/v1/centres` | Admin | Create diagnostic centre | `201`, `403` |
+| `PATCH` | `/api/v1/centres/{id}` | Admin | Update centre details & invalidate cache | `200`, `403`, `404` |
+| `DELETE`| `/api/v1/centres/{id}` | Admin | Soft-deactivate centre | `200`, `403`, `404` |
+| `GET` | `/api/v1/centres/{id}/tests` | Authenticated | List tests & centre-specific pricing | `200`, `404` |
+| `POST` | `/api/v1/centres/{id}/tests` | Admin | Map test to centre with price | `201`, `403`, `404` |
+| `PATCH` | `/api/v1/centres/{id}/tests/{tid}`| Admin | Update test price or availability flag | `200`, `403`, `404` |
+| `DELETE`| `/api/v1/centres/{id}/tests/{tid}`| Admin | Unmap test from centre | `200`, `403`, `404` |
+| `GET` | `/api/v1/tests` | Authenticated | List diagnostic tests (cached, paginated) | `200`, `401` |
+| `GET` | `/api/v1/tests/{id}` | Authenticated | Get single test details | `200`, `404` |
+| `POST` | `/api/v1/tests` | Admin | Create test in master catalogue | `201`, `403` |
+| `PATCH` | `/api/v1/tests/{id}` | Admin | Update test description/name | `200`, `403`, `404` |
+| `DELETE`| `/api/v1/tests/{id}` | Admin | Soft-deactivate test from catalogue | `200`, `403`, `404` |
+| `POST` | `/api/v1/bookings` | Authenticated | Create diagnostic appointment (`PENDING`) | `201`, `400`, `404`, `409` |
+| `GET` | `/api/v1/bookings` | Authenticated | List user bookings (admins see all) | `200`, `401` |
+| `GET` | `/api/v1/bookings/{id}` | Authenticated | Get booking details (owner or admin) | `200`, `403`, `404` |
+| `PATCH` | `/api/v1/bookings/{id}/cancel` | Authenticated | Cancel eligible booking (idempotent) | `200`, `403`, `404`, `409` |
+| `POST` | `/api/v1/payments` | Authenticated | Simulate payment (`SUCCESS` / `FAILED`) | `201`, `403`, `404`, `409` |
+| `POST` | `/api/v1/payments/webhook` | Provider | Ingest webhook event idempotently | `200`, `401`, `404`, `409` |
+| `GET` | `/api/v1/health` | Public | System health endpoint under v1 prefix | `200`, `503` |
+| `GET` | `/health` | Public | Readiness probe (PostgreSQL & Redis check) | `200`, `503` |
+
+<details>
+<summary><b>Click to expand verified cURL testing walkthrough</b></summary>
 
 ```bash
-# Activate virtual environment
-source .venv/bin/activate
+# 1. Login to obtain Bearer token
+TOKEN=$(curl -s -X POST http://localhost:8000/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"email":"user@diagpay.com","password":"UserPass123!"}' | jq -r .access_token)
+echo "JWT Token: $TOKEN"
 
-# Run full pytest suite with verbose output
+# 2. Browse diagnostic centres and obtain real IDs from the seeded database
+CENTRE_ID=$(curl -s -X GET http://localhost:8000/api/v1/centres \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.items[0].id')
+
+TEST_OFFERING=$(curl -s -X GET "http://localhost:8000/api/v1/centres/$CENTRE_ID/tests" \
+  -H "Authorization: Bearer $TOKEN" | jq -r '.items[0]')
+
+TEST_ID=$(echo "$TEST_OFFERING" | jq -r .test_id)
+PRICE=$(echo "$TEST_OFFERING" | jq -r .price)
+
+echo "Selected Centre: $CENTRE_ID, Test: $TEST_ID, Price: $PRICE"
+
+# -------------------------------------------------------------
+# FLOW A: In-App Simulated Payment Walkthrough
+# -------------------------------------------------------------
+
+# 3. Create appointment booking #1 (in PENDING state)
+BOOKING_1=$(curl -s -X POST http://localhost:8000/api/v1/bookings \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"centre_id\": \"$CENTRE_ID\",
+    \"test_id\": \"$TEST_ID\",
+    \"appointment_at\": \"2026-10-15T10:00:00Z\"
+  }")
+BOOKING_ID_1=$(echo "$BOOKING_1" | jq -r .id)
+echo "Created Booking #1 (PENDING): $BOOKING_ID_1"
+
+# 4. Simulate payment on Booking #1 (transitions PENDING -> CONFIRMED)
+curl -s -X POST http://localhost:8000/api/v1/payments \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"booking_id\": \"$BOOKING_ID_1\",
+    \"simulate_result\": \"SUCCESS\"
+  }" | jq .
+
+# -------------------------------------------------------------
+# FLOW B: External Provider Webhook Walkthrough (with HMAC Signature)
+# -------------------------------------------------------------
+
+# 5. Create a fresh appointment booking #2 (in PENDING state)
+BOOKING_2=$(curl -s -X POST http://localhost:8000/api/v1/bookings \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"centre_id\": \"$CENTRE_ID\",
+    \"test_id\": \"$TEST_ID\",
+    \"appointment_at\": \"2026-10-16T14:30:00Z\"
+  }")
+BOOKING_ID_2=$(echo "$BOOKING_2" | jq -r .id)
+echo "Created Fresh Booking #2 (PENDING): $BOOKING_ID_2"
+
+# 6. Construct webhook payload and compute exact HMAC-SHA256 signature
+WEBHOOK_SECRET="diagpay-webhook-hmac-secret-key-for-verifying-payloads"
+EVENT_ID="evt_webhook_live_001"
+PAYLOAD="{\"event_id\":\"$EVENT_ID\",\"provider_payment_id\":\"pay_live_001\",\"booking_id\":\"$BOOKING_ID_2\",\"status\":\"SUCCESS\",\"amount\":\"$PRICE\"}"
+
+SIGNATURE=$(python3 -c "import hmac, hashlib; print(hmac.new(b'$WEBHOOK_SECRET', '''$PAYLOAD'''.encode('utf-8'), hashlib.sha256).hexdigest())")
+echo "Generated HMAC Signature: $SIGNATURE"
+
+# 7. Deliver signed payment webhook to confirm Booking #2
+curl -s -X POST http://localhost:8000/api/v1/payments/webhook \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Signature: $SIGNATURE" \
+  -d "$PAYLOAD" | jq .
+
+# 8. Replay identical webhook (verifying idempotent HTTP 200 response without duplicate records)
+curl -s -X POST http://localhost:8000/api/v1/payments/webhook \
+  -H "Content-Type: application/json" \
+  -H "X-Webhook-Signature: $SIGNATURE" \
+  -d "$PAYLOAD" | jq .
+```
+</details>
+
+---
+
+## 5. How the Database Is Structured
+
+The relational schema is enforced with PostgreSQL primary keys, foreign key constraints, and partial unique indexes:
+
+```mermaid
+erDiagram
+    User ||--o{ Booking : "books"
+    DiagnosticCentre ||--o{ CentreTest : "offers"
+    DiagnosticTest ||--o{ CentreTest : "is offered at"
+    CentreTest ||--o{ Booking : "referenced by"
+    Booking ||--o{ Payment : "has transactions"
+
+    User {
+        UUID id PK
+        VARCHAR email UK
+        VARCHAR password_hash
+        VARCHAR full_name
+        VARCHAR role "USER | ADMIN"
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }
+
+    DiagnosticCentre {
+        UUID id PK
+        VARCHAR name
+        VARCHAR location
+        VARCHAR contact_number
+        VARCHAR email
+        BOOLEAN is_active
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }
+
+    DiagnosticTest {
+        UUID id PK
+        VARCHAR name
+        VARCHAR description
+        VARCHAR preparation_notes
+        BOOLEAN is_active
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }
+
+    CentreTest {
+        UUID id PK
+        UUID centre_id FK
+        UUID test_id FK
+        NUMERIC price "10,2"
+        BOOLEAN is_available
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }
+
+    Booking {
+        UUID id PK
+        UUID user_id FK
+        UUID centre_id FK
+        UUID test_id FK
+        NUMERIC amount "10,2 (Snapshot)"
+        VARCHAR status "PENDING|CONFIRMED|FAILED|CANCELLED"
+        TIMESTAMP appointment_at
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }
+
+    Payment {
+        UUID id PK
+        UUID booking_id FK
+        VARCHAR provider_payment_id
+        VARCHAR event_id UK
+        NUMERIC amount "10,2"
+        VARCHAR status "SUCCESS|FAILED"
+        VARCHAR payment_method
+        JSONB raw_payload
+        TIMESTAMP created_at
+        TIMESTAMP updated_at
+    }
+```
+
+### Critical Database Integrity Guarantees
+1. **Financial Exactness**: All monetary amounts (`CentreTest.price`, `Booking.amount`, `Payment.amount`) use `NUMERIC(10, 2)` mapped to Python `Decimal`. Floating-point arithmetic is strictly prohibited.
+2. **Partial Unique Slot Index**: 
+   ```sql
+   CREATE UNIQUE INDEX uq_bookings_active_user_slot 
+   ON bookings (user_id, centre_id, test_id, appointment_at) 
+   WHERE status IN ('PENDING', 'CONFIRMED');
+   ```
+   Prevents double-booking the same user into the same slot while allowing re-booking if the previous booking was `CANCELLED` or `FAILED`.
+3. **Compound Centre-Test Uniqueness**: `UNIQUE(centre_id, test_id)` prevents duplicate pricing definitions for the same centre-test pair.
+
+---
+
+## 6. How Booking, Payment & Webhook Flows Work
+
+### Complete Lifecycle State Machine
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Patient
+    participant API as FastAPI Backend
+    participant Redis as Redis Cache
+    participant DB as PostgreSQL (ACID)
+    actor Gateway as Payment Gateway
+
+    Note over Patient,DB: 1. Catalogue Discovery & Appointment Scheduling
+    Patient->>API: GET /api/v1/centres/{id}/tests
+    API->>Redis: Check Cache
+    alt Cache Miss
+        API->>DB: Fetch Tests & Centre-Specific Pricing
+        API->>Redis: Set Key with 300s TTL
+    end
+    API-->>Patient: Return Test List with Pricing
+    Patient->>API: POST /api/v1/bookings (centre_id, test_id, future appointment_at)
+    API->>DB: Validate Centre/Test Active & Available
+    API->>DB: Snapshot CentreTest.price into Booking.amount
+    API->>DB: Insert Booking (status = PENDING)
+    API-->>Patient: 201 Created (Booking Details)
+
+    Note over Patient,Gateway: 2. Payment Execution & Webhook Ingestion
+    alt Option A: In-App Simulated Payment
+        Patient->>API: POST /api/v1/payments (booking_id, simulate_result)
+        API->>DB: SELECT * FROM bookings WHERE id = :id FOR UPDATE
+        API->>DB: Insert Payment Record
+        API->>DB: Update Booking (CONFIRMED or FAILED)
+        API-->>Patient: 201 Created (Payment & Updated Booking)
+    else Option B: Asynchronous Gateway Webhook
+        Gateway->>API: POST /api/v1/payments/webhook (event_id, payload, signature)
+        API->>API: Verify HMAC-SHA256 Signature
+        API->>DB: Check event_id in payments table
+        alt Duplicate Event (Identical Payload)
+            API-->>Gateway: 200 OK (idempotent: true, no duplicate write)
+        else Duplicate Event (Conflicting Payload)
+            API-->>Gateway: 409 Conflict (EVENT_PAYLOAD_MISMATCH)
+        else New Event
+            API->>DB: SELECT * FROM bookings WHERE id = :id FOR UPDATE
+            API->>DB: Insert Payment & Transition Booking
+            API-->>Gateway: 200 OK (Processed)
+        end
+    end
+```
+
+### Valid Booking State Transitions
+
+| From State | To State | Allowed Via | Business Rationale |
+|---|---|---|---|
+| `PENDING` | `CONFIRMED` | Successful Payment / Webhook | Valid appointment confirmed upon payment verification. |
+| `PENDING` | `FAILED` | Failed Payment / Webhook | Payment declined; slot released for rebooking. |
+| `PENDING` | `CANCELLED` | User Cancellation | Patient cancels appointment before payment. |
+| `CONFIRMED` | `CANCELLED` | User Cancellation | Confirmed bookings can be cancelled according to the booking rules (refund processing is outside the current simulation). |
+| `CANCELLED` | `*` | *None (Terminal)* | Cancelled bookings **never** transition to `CONFIRMED` (rejected with HTTP 409). |
+| `CONFIRMED` | `FAILED` | *Rejected* | Stale/out-of-order failed events will not overturn a confirmed booking. |
+
+---
+
+## 7. How Edge Cases Are Handled
+
+| Edge Case | Root Problem | DiagPay Defensive Handling | Status Code |
+|---|---|---|---|
+| **Past Date Appointment** | Patient books an appointment in the past | Validates `appointment_at > utcnow() + 60s` at Pydantic and service level | `400 Bad Request` |
+| **Concurrent Slot Collision** | Two concurrent requests attempt to book the exact same slot | Database partial unique index (`uq_bookings_active_user_slot`) enforces atomic slot collision rejection | `409 Conflict` |
+| **Double Payment on Booking** | User pays twice simultaneously or retries a confirmed booking | Row lock (`with_for_update()`) serializes execution; rejects if already `CONFIRMED` | `409 Conflict` |
+| **Payment on Cancelled Booking** | Payment succeeds on gateway after patient cancelled booking | State machine verifies current status under lock; refuses to confirm cancelled booking | `409 Conflict` |
+| **Duplicate Webhook Replay** | Network retry re-delivers the identical payment webhook | Queries `payments.event_id`; returns immediate cached confirmation (`idempotent: true`) | `200 OK` |
+| **Tampered Webhook Event** | Gateway sends existing `event_id` with modified amount or status | Payload comparator checks `amount`, `status`, `payment_id`; rejects data tampering | `409 Conflict` |
+| **Invalid Webhook Signature** | Attacker spoofs payment confirmation webhook | Verifies `X-Webhook-Signature` using constant-time HMAC-SHA256 comparison | `401 Unauthorized` |
+| **Redis Cache Outage** | Redis container crashes or network splits during high traffic | Cache service wraps all calls in `try/except Exception`; falls back to PostgreSQL seamlessly | `200 OK (Degraded)` |
+
+---
+
+## 8. How the Project Is Tested
+
+The test suite consists of **53 automated tests** (53 passed, 0 failed, 0 skipped) covering authentication, catalogue management, centre-test pricing, bookings, payments, webhooks, concurrency scenarios, rate limiting, and health checks, with 75% overall codebase coverage:
+
+### Test Suite Execution
+```bash
+# Run the entire test suite
 pytest -v
 
-# Run with coverage report
+# Run with line-by-line coverage
 pytest --cov=app --cov-report=term-missing
 ```
 
-### Test Suite Structure (53 Tests Passing)
-- `tests/test_auth.py`: User registration, duplicate detection, password hashing, JWT login, profile retrieval.
-- `tests/test_centres.py`: Pagination, centre retrieval, admin creation/updates, non-admin rejection.
-- `tests/test_tests.py`: Catalogue listing, test creation, admin authorization.
-- `tests/test_centre_tests.py`: Dynamic pricing assignment, availability toggling.
-- `tests/test_bookings.py`: Booking creation, past date rejection, duplicate slot guard, user access isolation, idempotent cancellation.
-- `tests/test_payments.py`: Successful/failed payment simulation, double confirmation rejection, cancelled booking guards.
-- `tests/test_webhooks.py`: Ingestion, duplicate replay idempotency, conflicting payload detection, cancelled booking protection, HMAC verification.
-- `tests/test_concurrency.py`: Partial unique slot collision, payment double confirmation, concurrent identical webhooks, and state machine matrix.
-- `tests/test_rate_limit.py`: Rapid request threshold enforcement.
-- `tests/test_health.py`: System readiness and dependency validation.
+### Test Organization
+- **`tests/test_auth.py`** (6 tests): User signup, lowercase normalization, password strength, Argon2 hashing, JWT login, profile retrieval, duplicate email rejection.
+- **`tests/test_centres.py`** (7 tests): Centre listing, pagination, individual centre details, admin creation, admin updates, admin soft-deletion, RBAC 403 checks.
+- **`tests/test_tests.py`** (6 tests): Diagnostic test catalogue retrieval, test creation, admin authorization guards, soft deactivation.
+- **`tests/test_centre_tests.py`** (7 tests): Centre-test offering retrieval, price mapping, availability toggling, unmapping.
+- **`tests/test_bookings.py`** (9 tests): Appointment creation, future date validation, inactive centre/test prevention, slot collision guard, user data isolation, idempotent cancellation.
+- **`tests/test_payments.py`** (5 tests): Successful payment simulation, failed payment simulation, double-confirmation prevention, cancelled booking payment guard.
+- **`tests/test_webhooks.py`** (6 tests): HMAC-SHA256 signature verification, successful event ingestion, duplicate replay idempotency, payload tampering detection, cancelled booking protection.
+- **`tests/test_concurrency.py`** (4 tests): Multi-threaded simultaneous booking slot collision, double payment simulation race, concurrent identical webhook delivery, state machine transition matrix.
+- **`tests/test_rate_limit.py`** (1 test): SlowAPI threshold enforcement on authentication and payment endpoints.
+- **`tests/test_health.py`** (2 tests): Database and cache readiness probes.
 
 ---
 
-## 16. Interactive API Documentation
+## 9. What Engineering Decisions Were Made
 
-Once the server is running, explore the interactive OpenAPI documentation:
-
-- **Swagger UI**: [http://localhost:8000/docs](http://localhost:8000/docs)
-- **ReDoc**: [http://localhost:8000/redoc](http://localhost:8000/redoc)
-- **OpenAPI JSON**: [http://localhost:8000/openapi.json](http://localhost:8000/openapi.json)
-
----
-
-## 17. Example cURL Commands
-
-### 1. User Login
-```bash
-curl -X POST http://localhost:8000/api/v1/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "email": "user@diagpay.com",
-    "password": "UserPass123!"
-  }'
-```
-
-### 2. Discover Diagnostic Centres
-```bash
-curl -X GET http://localhost:8000/api/v1/centres?page=1&page_size=10 \
-  -H "Authorization: Bearer <YOUR_ACCESS_TOKEN>"
-```
-
-### 3. Retrieve Tests Offered at a Diagnostic Centre
-```bash
-curl -X GET http://localhost:8000/api/v1/centres/<CENTRE_ID>/tests \
-  -H "Authorization: Bearer <YOUR_ACCESS_TOKEN>"
-```
-
-### 4. Create a Diagnostic Booking
-```bash
-curl -X POST http://localhost:8000/api/v1/bookings \
-  -H "Authorization: Bearer <YOUR_ACCESS_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "centre_id": "<CENTRE_ID>",
-    "test_id": "<TEST_ID>",
-    "appointment_at": "2026-10-15T10:00:00Z"
-  }'
-```
-
-### 5. Simulate Payment
-```bash
-curl -X POST http://localhost:8000/api/v1/payments \
-  -H "Authorization: Bearer <YOUR_ACCESS_TOKEN>" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "booking_id": "<BOOKING_ID>",
-    "simulate_result": "SUCCESS"
-  }'
-```
-
-### 6. Process Payment Provider Webhook
-```bash
-curl -X POST http://localhost:8000/api/v1/payments/webhook \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event_id": "evt_live_9981",
-    "provider_payment_id": "pay_live_4421",
-    "booking_id": "<BOOKING_ID>",
-    "status": "SUCCESS",
-    "amount": "350.00"
-  }'
-```
-
-### 7. Replay Identical Webhook (Idempotent Test)
-```bash
-# Re-sending the identical payload returns HTTP 200 with "idempotent": true
-curl -X POST http://localhost:8000/api/v1/payments/webhook \
-  -H "Content-Type: application/json" \
-  -d '{
-    "event_id": "evt_live_9981",
-    "provider_payment_id": "pay_live_4421",
-    "booking_id": "<BOOKING_ID>",
-    "status": "SUCCESS",
-    "amount": "350.00"
-  }'
-```
+| Decision | Alternative Considered | Rationale |
+|---|---|---|
+| **Decoupled `CentreTest` Junction** | Flat price field on `DiagnosticTest` | Real-world diagnostic pricing varies by centre facility, operating costs, and location. |
+| **Immutable Price Snapshotting** | Dynamically joining price on invoice generation | Protects financial audit trails; updating catalogue price cannot retroactively change past bookings. |
+| **Pessimistic Locking (`with_for_update`)** | Optimistic locking via version column | Financial state transitions require immediate serialization without client retry loops. |
+| **Argon2id Password Hashing** | Legacy `bcrypt` | Winner of the Password Hashing Competition; superior resistance against GPU and ASIC attacks. |
+| **HMAC-SHA256 Webhook Verification** | Unsigned / IP-whitelisted webhooks | Verifies payload integrity and authenticity using shared-secret HMAC-SHA256 digests; rejects untrusted or tampered payloads. |
+| **PostgreSQL Partial Unique Index** | Application-level `SELECT` checks | Prevents race condition slot collisions at the ACID storage engine level. |
+| **Soft Deletion (`is_active = false`)** | Cascading SQL `DELETE` | Preserves referential integrity and historical records for completed patient bookings. |
+| **Graceful Cache Degradation** | Hard dependency on Redis | Fault tolerance: application continues serving read traffic from PostgreSQL if Redis fails. |
 
 ---
 
-## 18. Assumptions, Design Decisions & Trade-offs
+## 10. Implementation Coverage
 
-1. **Independent Pricing Model**: Decoupling tests from centres mirrors real-world healthcare marketplaces where laboratory pricing varies by geographical location and facility equipment.
-2. **Soft Deletions**: Deactivating diagnostic centres or tests sets `is_active = false` rather than issuing cascading SQL `DELETE`s. This guarantees historical audit trails and patient booking receipts remain intact.
-3. **Pessimistic Row Locking over Optimistic Locking**: For financial transitions on bookings, `SELECT ... FOR UPDATE` was chosen over version columns because payment attempts for an individual booking are low frequency but carry high consistency risks (double spend, duplicate confirmation).
-4. **Synchronous vs Asynchronous Webhooks**: Webhook ingestion performs idempotency checks and booking transitions synchronously within a single database transaction. For very high webhook throughput (>10,000 req/sec), a Kafka or RabbitMQ queue would decouple receipt from execution. For this service's scope, transactional synchronous processing guarantees zero lag between provider update and user confirmation.
-5. **Argon2id vs Bcrypt**: Argon2id was selected for password hashing due to superior resistance against GPU/ASIC-assisted brute-force attacks compared to legacy bcrypt.
+The following table summarizes the major capabilities implemented in DiagPay and the corresponding verification coverage:
+
+| Capability | Implementation | Verification |
+|---|---|---|
+| **Authentication & Authorization** | JWT, Argon2id, RBAC (`app/api/v1/auth.py`, `app/services/auth_service.py`) | `tests/test_auth.py` |
+| **Diagnostic Centres** | Centre service and CRUD APIs (`app/api/v1/centres.py`, `app/services/centre_service.py`) | `tests/test_centres.py` |
+| **Diagnostic Tests** | Test catalogue and CRUD APIs (`app/api/v1/tests.py`, `app/services/test_service.py`) | `tests/test_tests.py` |
+| **Centre-Test Pricing** | CentreTest mapping with centre-specific prices (`app/models/centre_test.py`, `app/api/v1/centres.py`) | `tests/test_centre_tests.py` |
+| **Booking Lifecycle** | Transactional booking service (`app/api/v1/bookings.py`, `app/services/booking_service.py`) | `tests/test_bookings.py` |
+| **Payment Processing** | Simulated payment service (`app/api/v1/payments.py`, `app/services/payment_service.py`) | `tests/test_payments.py` |
+| **Webhook Processing** | HMAC verification + idempotency (`app/api/v1/payments.py`, `app/services/webhook_service.py`) | `tests/test_webhooks.py` |
+| **Concurrency Safety** | Database constraints + row locking (`uq_bookings_active_user_slot`, `with_for_update`) | `tests/test_concurrency.py` |
+| **Rate Limiting** | SlowAPI rate limiting middleware (`app/core/rate_limit.py`) | `tests/test_rate_limit.py` |
+| **Health Monitoring** | Database and Redis readiness checks (`app/api/v1/health.py`) | `tests/test_health.py` |
+| **Containerization** | Dockerfile and Docker Compose orchestration (`Dockerfile`, `docker-compose.yml`, `entrypoint.sh`) | Docker environment |
+| **Database Versioning** | Alembic migrations (`alembic/versions/001_initial_schema.py`) | `alembic/` |
+
+### Additional Engineering Features
+
+The following architectural and operational capabilities are implemented and verified in the repository:
+- **Redis Caching & Dynamic Invalidation**: Catalogue caching with automated pattern-based invalidation upon administrative updates (`app/services/cache_service.py`) and graceful database fallback when Redis is offline.
+- **Fixed-Window Rate Limiting**: SlowAPI protection on sensitive endpoints (`/api/v1/auth/login`, `/api/v1/auth/signup`, `/api/v1/payments`, and `/api/v1/payments/webhook`) via `app/core/rate_limit.py`.
+- **Structured JSON Observability**: Structured JSON logging via `structlog` (`app/logging_config.py`) with request correlation IDs (`X-Request-ID`), process latency headers (`X-Process-Time`), and automatic secret redaction.
+- **Multi-Service Containerization**: Dockerfile and Docker Compose orchestration with automated health check dependencies, migrations, and seeder execution.
+- **Service Readiness Probes**: Dual `/health` and `/api/v1/health` probes validating live PostgreSQL and Redis connectivity (`app/api/v1/health.py`).
+- **Concurrency & Race Condition Test Suite**: Dedicated multi-threaded and asynchronous race tests validating slot collisions, payment double-spends, and replay idempotency (`tests/test_concurrency.py`).
+- **HMAC Webhook Verification**: Cryptographic payload verification via HMAC-SHA256 (`app/core/security.py`).
+- **Database Schema Versioning**: Automated Alembic migrations managing schema evolution (`alembic/`).
+
+*(Note: Celery/ARQ background processing is intentionally not included because the current payment simulation does not require asynchronous job processing; all state transitions execute synchronously within ACID database transactions.)*
 
 ---
 
-## 19. What Could Be Improved With More Time
+## Author
 
-1. **Asynchronous Task Queue (Celery / ARQ)**: Offloading webhook side-effects (e.g. sending SMS or Email booking confirmations) to background workers.
-2. **Audit Log Table**: Maintaining an immutable change log table tracking every state transition with timestamp, actor, previous status, and new status.
-3. **Multi-Tenancy Support**: Partitioning centres into healthcare networks / hospital chains with dedicated tenant administrators.
-4. **Time Slot Capacity Limits**: Enforcing maximum concurrent appointments per hour per centre room.
-5. **Automated Refresh Tokens**: Implementing rotating refresh tokens stored securely in HTTP-only cookies.
+Anirudh Chhabra
